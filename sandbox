@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -e
+
+PARENT_DIR=$( cd "$(dirname "${BASH_SOURCE[0]}")" ; pwd -P )
+SANDBOX_DIR=$PARENT_DIR/_sandbox
+if [ ! -d "$SANDBOX_DIR" ]; then
+    echo "Pulling sandbox..."
+    git clone https://github.com/algorand/sandbox.git $SANDBOX_DIR
+    sed -i 's/export INDEXER_ENABLE_ALL_PARAMETERS="false"/export INDEXER_ENABLE_ALL_PARAMETERS="true"/g' $SANDBOX_DIR/config.dev
+fi
+
+$SANDBOX_DIR/sandbox "$@"

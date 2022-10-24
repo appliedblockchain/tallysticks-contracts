@@ -1,0 +1,68 @@
+{
+  "name": "@appliedblockchain/tallysticks-contracts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tallsticks smart contracts",
+  "main": "build/index.js",
+  "scripts": {
+    "test": "jest -c tests/config/default.js --runInBand",
+    "test:ci": "./scripts/test-contracts.sh",
+    "test:performance": "./scripts/test-performance.sh",
+    "lint": "eslint .",
+    "migrate": "npx ts-node scripts/migrate.ts",
+    "migrate-testnet": "npx ts-node scripts/migrate-testnet.ts",
+    "build": "tsc && cp -r teal build/.",
+    "deploy:dry": "npx ts-node scripts/deploy.ts --dry-run",
+    "deploy": "npx ts-node scripts/deploy.ts",
+    "create-asset": "npx ts-node scripts/create-asset.ts",
+    "generate-account": "npx ts-node scripts/generate-account.ts",
+    "setup-organisation": "npx ts-node scripts/setup-organisation.ts",
+    "reset-app": "npx ts-node scripts/reset-app.ts"
+  },
+  "jest": {
+    "setupFilesAfterEnv": [
+      "./tests/jest-config.js"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/appliedblockchain/tallysticks.git"
+  },
+  "author": "Applied Blockchain",
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/appliedblockchain/tallysticks/issues"
+  },
+  "homepage": "https://github.com/appliedblockchain/tallysticks#readme",
+  "dependencies": {
+    "@appliedblockchain/silentdata-mint": "file:../silentdata-mint/contracts",
+    "@appliedblockchain/tallysticks-contract-config": "file:../contract-config",
+    "algosdk": "1.15.0",
+    "config": "^3.3.7",
+    "minimist": "^1.2.6",
+    "seedrandom": "^3.0.5"
+  },
+  "devDependencies": {
+    "@appliedblockchain/eslint-config": "^3.0.0",
+    "@types/jest": "^27.0.3",
+    "@types/minimist": "^1.2.2",
+    "@typescript-eslint/eslint-plugin": "^5.4.0",
+    "@typescript-eslint/parser": "^5.4.0",
+    "cbor": "^8.1.0",
+    "eslint": "^8.3.0",
+    "eslint-config-prettier": "^8.3.0",
+    "eslint-plugin-prettier": "^4.0.0",
+    "jest": "^27.3.1",
+    "lint-staged": "^12.1.2",
+    "prettier": "^2.5.0",
+    "ts-jest": "^27.0.7",
+    "ts-node": "^10.8.1",
+    "typescript": "^4.4.4"
+  },
+  "lint-staged": {
+    "*.{js,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  }
+}

@@ -1,0 +1,1426 @@
+#pragma version 5
+// Tallysticks matching stateful contract
+//
+// Coordinates 1-1 matching between invoice financing requests and investors
+//
+// -- Operations:
+// create
+// - Args: identity token ID (int), minter ID
+// - Transaction group: [create]
+// - Description: Creates the application and sets global configuration
+// setup
+// - Args: "setup"
+// - Transaction group: [pay app, setup]
+// - Assets: [currency token]
+// - Description: Opts-in to currency token and creates bidding and access tokens
+// withdraw
+// - Args: "withdraw"
+// - Transaction group: [transfer from escrow to investor, withdraw]
+// - Assets: [bid token, access token, currency token]
+// - Accounts: [escrow account]
+// - Description: Checks that bidding isn't in progress before allowing withdrawal
+// unfreeze
+// - Args: "unfreeze", minimum loan value (int)
+// - Transaction group: [opt in to bid token, opt in to access token, unfreeze]
+// - Assets: [bid token, access token, identity token, currency token]
+// - Accounts: [investor account, escrow account]
+// - Description: Verifies investor is KYC'd and admin is calling function
+// freeze
+// - Args: "freeze"
+// - Transaction group: [transfer bid token, transfer access token, freeze]
+// - Assets: [identity token]
+// - Description: Verifies investor is calling the freeze function
+// verify
+// - Args: "verify"
+// - Transaction group: [verify, transfer ownership token]
+// - Assets: [ownership token]
+// - Accounts: [invoice account]
+// - Applications: [minter app]
+// - Description: Verifies that an invoice exists and hasn't been used, opts in to ownership token
+//                and sets timer for bidding process
+// bid
+// - Args: "bid", min value, max value, min term, max term, min interest, max risk
+// - Transaction group: [transfer bidding token, bid]
+// - Assets: [bidding token, currency token]
+// - Accounts: [invoice account]
+// - Applications: [minter app]
+// - Description: Collects bid from an investor escrow account and stores leading bid
+// action
+// - Args: "action"
+// - Transaction group: [escrow opt-in to ownership token, escrow transfer funds to borrower, action]
+// - Assets: [bidding token, currency token, ownership token]
+// - Accounts: [invoice account, escrow account, borrower]
+// - Applications: [minter app]
+// - Description: Verifies all bids have been made before actioning the winner
+// reclaim
+// - Args: "reclaim"
+// - Transaction group: [reclaim]
+// - Assets: [bidding token, access token]
+// - Description: Sends bidding tokens back to access token holders, if they don't have sufficient funds for next
+//                round of bidding revoke access token (freeze), unlock once all bidding tokens returned
+// reset
+// - Args: "reset"
+// - Transaction group: [reset]
+// - Assets: [ownership token]
+// - Accounts: [invoice account, borrower]
+// - Applications: [minter app]
+// - Description: Admin can reset the matching app if the bidding period has ended and not all bids have been collected
+// repay
+// - Args: "repay"
+// - Transaction group: [repay, borrower transfers funds to escrow, escrow transfers ownership to invoice]
+// - Assets: [currency token]
+// - Accounts: [invoice account, escrow account]
+// - Applications: [minter app]
+// - Description: Verifies borrower has sent the value of the invoice to the escrow and escrow has burned the invoice
+//
+// -- Global state:
+// token_reserve_size (int) = Initial holdings of bid and access tokens
+// identity_token_id (int) = Asset ID of identity token
+// minter_id (int) = ID of the minter application
+// max_bid_fees (int) = Maximum cost of round of bidding
+// currency_id (int) = Asset ID of currency token
+// bidding_token_id (int) = Asset ID of bidding token
+// access_token_id (int) = Asset ID of access token
+// bid_time_limit (int) = Maximum length of time bidding can go on for (s)
+// bidding_timeout (int) = Timestamp after which admin can reset bidding process
+// invoice_address (bytes) = Address of the current invoice to be funded
+// owner_address (bytes) = Address of the original owner of the invoice to be funded
+// escrow_address (bytes) = Address of leading bidder
+// leading_timestamp (int) = Timestamp of leading bidder
+//
+// -- Local state:
+// timestamp (int) = The time an investors escrow was unfrozen/last supplied a loan
+// debtor_address (bytes) = The address of the borrower who owes money for the invoice
+// investor_address (bytes) = The address of the investor who owns the escrow
+//
+// -- Scratch space:
+// 0: Ownership token ID
+// 1: Address of invoice smart signature
+// 2: Address of investor escrow smart signature
+// 3: Address of investor
+// 4: Address of borrower
+//
+
+// Block DeleteApplication, CloseOut and UpdateApplication
+txn OnCompletion
+int DeleteApplication
+==
+bnz reject
+
+txn OnCompletion
+int CloseOut
+==
+bnz reject
+
+txn OnCompletion
+int UpdateApplication
+==
+bnz reject
+
+// Check if application ID is 0 (app being created, go to creation)
+txn ApplicationID
+int 0
+==
+bnz creation
+
+// Go to the no_op branch if no additional effects are required
+txn OnCompletion
+int NoOp
+==
+bnz no_op
+
+// Allow opt in
+txn OnCompletion
+int OptIn
+==
+bnz approve
+
+// Error if we get here
+err
+
+// -- end main branch
+
+// BRANCH creation START
+creation:
+  global GroupSize
+  int 1
+  ==
+  assert
+
+  txn NumAppArgs
+  int 4
+  ==
+  assert
+
+  byte "token_reserve_size"
+  int 1000000000000
+  app_global_put
+
+  byte "identity_token_id"
+  txna ApplicationArgs 0 // Identity token ID
+  btoi
+  app_global_put
+
+  byte "minter_id"
+  txna ApplicationArgs 1 // Minting application ID
+  btoi
+  app_global_put
+
+  byte "bid_time_limit"
+  txna ApplicationArgs 2 // Bidding time limit (s)
+  btoi
+  app_global_put
+
+  byte "max_bid_fees"
+  txna ApplicationArgs 3 // Max cost of one bidding round (MicroAlgos)
+  btoi
+  app_global_put
+
+  b approve
+// BRANCH creation END
+
+// BRANCH no_op START
+no_op:
+  txna ApplicationArgs 0
+  byte "setup"
+  ==
+  bnz setup
+
+  txna ApplicationArgs 0
+  byte "set_bid_time_limit"
+  ==
+  bnz set_bid_time_limit
+
+  txna ApplicationArgs 0
+  byte "withdraw"
+  ==
+  bnz withdraw
+
+  txna ApplicationArgs 0
+  byte "unfreeze"
+  ==
+  bnz unfreeze
+
+  txna ApplicationArgs 0
+  byte "freeze"
+  ==
+  bnz freeze
+
+  txna ApplicationArgs 0
+  byte "verify"
+  ==
+  bnz verify
+
+  txna ApplicationArgs 0
+  byte "bid"
+  ==
+  bnz bid
+
+  txna ApplicationArgs 0
+  byte "action"
+  ==
+  bnz action
+
+  txna ApplicationArgs 0
+  byte "reclaim"
+  ==
+  bnz reclaim
+
+  txna ApplicationArgs 0
+  byte "reset"
+  ==
+  bnz reset
+
+  txna ApplicationArgs 0
+  byte "repay"
+  ==
+  bnz repay
+
+  err
+// BRANCH no_op END
+
+// BRANCH setup START
+setup:
+  // Only the admin can setup
+  callsub check_admin
+
+  // Check app hasn't already been set up
+  byte "currency_id"
+  app_global_get
+  int 0
+  ==
+  assert
+
+  // Setup should be grouped with payment transaction
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  gtxn 0 TypeEnum
+  int pay // Payment
+  ==
+  assert
+
+  // Check liquidity pool is receiver of payment
+  gtxn 0 Receiver
+  global CurrentApplicationAddress
+  ==
+  assert
+
+  gtxn 0 CloseRemainderTo
+  global ZeroAddress
+  ==
+  assert
+
+  txn NumAssets
+  int 1
+  ==
+  assert
+
+  // Opt in to currency token
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    txn Assets 0
+    itxn_field XferAsset
+    global CurrentApplicationAddress
+    itxn_field AssetReceiver
+  itxn_submit
+
+  byte "currency_id"
+  txn Assets 0
+  app_global_put
+
+  // Create bidding token
+  itxn_begin
+    int acfg
+    itxn_field TypeEnum
+    byte "token_reserve_size"
+    app_global_get
+    itxn_field ConfigAssetTotal
+    int 0
+    itxn_field ConfigAssetDecimals
+    byte "TLBID"
+    itxn_field ConfigAssetUnitName
+    byte "TallysticksBid"
+    itxn_field ConfigAssetName
+    global CurrentApplicationAddress
+    dup
+    dup
+    dup
+    itxn_field ConfigAssetReserve
+    itxn_field ConfigAssetManager
+    itxn_field ConfigAssetFreeze
+    itxn_field ConfigAssetClawback
+  itxn_submit
+
+  byte "bidding_token_id"
+  itxn CreatedAssetID
+  app_global_put
+
+  // Create access token
+  itxn_begin
+    int acfg
+    itxn_field TypeEnum
+    byte "token_reserve_size"
+    app_global_get
+    itxn_field ConfigAssetTotal
+    int 0
+    itxn_field ConfigAssetDecimals
+    byte "TLACS"
+    itxn_field ConfigAssetUnitName
+    byte "TallysticksAccess"
+    itxn_field ConfigAssetName
+    global CurrentApplicationAddress
+    dup
+    dup
+    dup
+    itxn_field ConfigAssetReserve
+    itxn_field ConfigAssetManager
+    itxn_field ConfigAssetFreeze
+    itxn_field ConfigAssetClawback
+  itxn_submit
+
+  byte "access_token_id"
+  itxn CreatedAssetID
+  app_global_put
+
+  b approve
+// BRANCH setup END
+
+// BRANCH set_bid_time_limit START
+set_bid_time_limit:
+  // Only the admin can set bid_time_limit
+  callsub check_admin
+  callsub check_bidding_lock
+
+  global GroupSize
+  int 1
+  ==
+  assert
+
+  txn NumAppArgs
+  int 2
+  ==
+  assert
+
+  byte "bid_time_limit"
+  txna ApplicationArgs 1 // Bidding time limit (s)
+  btoi
+  app_global_put
+
+  b approve
+// BRANCH set_bid_time_limit END
+
+// BRANCH withdraw START
+withdraw:
+  // Check grouped with a transfer of currency
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  gtxn 0 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  gtxn 0 XferAsset
+  byte "currency_id"
+  app_global_get
+  ==
+  assert
+  
+  txn Accounts 1
+  callsub set_escrow_address
+
+  // Check sender of currency matches escrow account
+  gtxn 0 Sender
+  callsub get_escrow_address
+  ==
+  assert
+
+  // Check if escrow has access token
+  // If not, withdrawal is ok (account frozen)
+  callsub get_escrow_address
+  byte "access_token_id"
+  app_global_get
+  asset_holding_get AssetBalance
+  bz approve
+  int 0
+  ==
+  bz approve
+
+  // Check if escrow has bidding token
+  // If not, block withdrawal (bidding in progress)
+  callsub get_escrow_address
+  callsub get_bidding_token_balance
+  int 0
+  ==
+  assert
+
+  b approve
+// BRANCH withdraw END
+
+// BRANCH unfreeze START
+unfreeze:
+  callsub check_bidding_lock
+
+  // Should be grouped with two opt in transactions
+  global GroupSize
+  int 3
+  ==
+  assert
+
+  txn Accounts 1
+  callsub set_investor_address
+
+  txn Accounts 2
+  callsub set_escrow_address
+
+  gtxn 0 Sender
+  callsub get_escrow_address
+  ==
+  assert
+
+  gtxn 1 Sender
+  callsub get_escrow_address
+  ==
+  assert
+
+  callsub check_admin
+
+  txn NumAppArgs
+  int 2
+  ==
+  assert
+
+  // Check that investor has identity token
+  callsub get_investor_address
+  byte "identity_token_id"
+  app_global_get
+  asset_holding_get AssetBalance
+  assert // Opted in
+  int 1
+  ==
+  assert // Balance == 1
+
+  // Check that escrow has funds to cover minimum loan
+  callsub get_escrow_address
+  callsub get_currency_balance // units USD * 1000000
+  txn ApplicationArgs 1 // minimum loan value units USD * 100
+  btoi
+  int 10000
+  *
+  >=
+  assert // Balance >= minimum loan value
+
+  callsub check_bidding_balance 
+  assert // available balance >= max amount required for one round of bidding
+
+  // Check that escrow hasn't already got a bidding token
+  callsub get_escrow_address
+  callsub get_bidding_token_balance
+  int 0
+  ==
+  assert
+
+  // Check that escrow hasn't already got an access token
+  callsub get_escrow_address
+  callsub get_access_token_balance
+  int 0
+  ==
+  assert
+
+  // Send tokens to escrow account
+  callsub transfer_bidding_token
+  callsub transfer_access_token 
+
+  // Write current timestamp to local storage of escrow
+  callsub get_escrow_address
+  byte "timestamp"
+  global LatestTimestamp
+  app_local_put
+
+  // Write investor address to local storage of escrow
+  callsub get_escrow_address
+  byte "investor_address"
+  callsub get_investor_address
+  app_local_put
+
+  b approve
+// BRANCH unfreeze END
+
+// BRANCH freeze START
+freeze:
+  callsub check_bidding_lock
+
+  // Check sender has identity token
+  txn Sender // Investor
+  byte "identity_token_id"
+  app_global_get
+  asset_holding_get AssetBalance
+  assert // Opted in
+  int 1
+  ==
+  assert // Balance == 1
+
+  b approve
+// BRANCH freeze END
+
+// BRANCH verify START
+verify:
+  callsub check_bidding_lock
+
+  txn Accounts 1
+  callsub set_invoice_address
+
+  byte "asa_id"
+  callsub get_invoice_property
+  callsub set_ownership_token_id
+
+  // Check sender is owner of asset (with ownership token)
+  txn Sender // Borrower
+  callsub check_ownership_token_balance
+
+  callsub get_invoice_address
+  callsub check_ownership_token_balance
+
+  // Check asset hasn't previously been funded
+  callsub get_invoice_address
+  global CurrentApplicationID
+  byte "debtor_address"
+  app_local_get_ex
+  bnz reject
+  pop
+
+  // Check asset meets some minimum requirements
+  byte "value"
+  callsub get_invoice_property
+  int 0
+  >
+  assert
+
+  byte "currency_code"
+  callsub get_invoice_property
+  byte "USD"
+  ==
+  assert
+
+  byte "risk_score"
+  callsub get_invoice_property
+  int 100
+  <=
+  assert
+
+  byte "risk_score"
+  callsub get_invoice_property
+  int 0
+  >
+  assert
+
+  byte "due_date"
+  callsub get_invoice_property
+  global LatestTimestamp
+  >=
+  assert
+
+  // Check grouped with transfer of ownership token
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  gtxn 1 Sender
+  txn Sender
+  ==
+  assert
+
+  gtxn 1 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  gtxn 1 XferAsset
+  callsub get_ownership_token_id
+  ==
+  assert
+
+  gtxn 1 AssetAmount
+  int 1
+  ==
+  assert
+
+  // Opt in to ownership token
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    callsub get_ownership_token_id
+    itxn_field XferAsset
+    global CurrentApplicationAddress
+    itxn_field AssetReceiver
+    int 0
+    itxn_field Fee
+  itxn_submit
+
+  // Set bidding timeout
+  byte "bidding_timeout"
+  global LatestTimestamp
+  byte "bid_time_limit"
+  app_global_get
+  +
+  app_global_put
+
+  byte "invoice_address"
+  callsub get_invoice_address
+  app_global_put
+
+  byte "owner_address"
+  txn Sender // Borrower
+  app_global_put
+
+  b approve
+// BRANCH verify END
+
+// BRANCH bid START
+bid:
+  callsub check_bidding_timeout
+
+  // Check grouped with transfer of bidding token
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  gtxn 0 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  gtxn 0 XferAsset
+  byte "bidding_token_id"
+  app_global_get
+  ==
+  assert
+
+  gtxn 0 AssetAmount
+  int 1
+  ==
+  assert
+
+  gtxn 0 Sender
+  txn Sender
+  ==
+  assert
+
+  txn Accounts 1
+  callsub set_invoice_address
+
+  // Check input account matches expected smart sig address
+  byte "invoice_address"
+  app_global_get
+  callsub get_invoice_address
+  ==
+  assert
+
+  // Verify investor requirements match invoice
+  byte "value"
+  callsub get_invoice_property
+  txn ApplicationArgs 1 // min value
+  btoi
+  >=
+  bz approve
+
+  byte "value"
+  callsub get_invoice_property
+  txn ApplicationArgs 2 // max value
+  btoi
+  <=
+  bz approve
+
+  byte "due_date"
+  callsub get_invoice_property
+  global LatestTimestamp
+  -
+  txn ApplicationArgs 3 // min term
+  btoi
+  >=
+  bz approve
+
+  byte "due_date"
+  callsub get_invoice_property
+  global LatestTimestamp
+  -
+  txn ApplicationArgs 4 // max term
+  btoi
+  <=
+  bz approve
+
+  byte "interest_rate"
+  callsub get_invoice_property
+  txn ApplicationArgs 5 // min interest
+  btoi
+  >=
+  bz approve
+
+  byte "risk_score"
+  callsub get_invoice_property
+  txn ApplicationArgs 6 // max risk
+  btoi
+  <=
+  bz approve
+
+  // Verify the escrow has enough funds to pay
+  txn Sender
+  callsub get_currency_balance
+  callsub calc_invoice_price
+  >=
+  bz approve // Return if escrow cannot afford invoice
+ 
+  // Compare escrow timestamp with leader
+  byte "leading_timestamp"
+  app_global_get
+  dup
+  bz set_leading_bid
+
+  // Overwrite leading bidder if timestamp is smaller
+  gtxn 0 Sender // escrow
+  global CurrentApplicationID
+  byte "timestamp"
+  app_local_get_ex
+  assert
+  > // If escrow timestamp < leading timestamp, set new leader
+  bnz set_leading_bid
+
+  b approve
+// BRANCH bid END
+
+// BRANCH set_leading_bid START
+set_leading_bid:
+  byte "leading_timestamp"
+  gtxn 0 Sender // escrow
+  global CurrentApplicationID
+  byte "timestamp"
+  app_local_get_ex
+  assert
+  app_global_put
+
+  byte "escrow_address"
+  gtxn 0 Sender // escrow
+  app_global_put
+
+  b approve
+// BRANCH set_leading_bid END
+
+// BRANCH action START
+action:
+  // Bid must be actioned before timeout is over
+  callsub check_bidding_timeout
+
+  // Only the admin can action winning bid
+  callsub check_admin
+
+  // Check all bidding tokens have been returned
+  global CurrentApplicationAddress
+  callsub get_bidding_token_balance
+  byte "token_reserve_size"
+  app_global_get
+  ==
+  assert
+
+  // Check first transaction is opt-in to ownership token from escrow
+  global GroupSize
+  int 3
+  ==
+  assert
+
+  txn Accounts 1
+  callsub set_invoice_address
+
+  gtxn 0 XferAsset
+  byte "asa_id"
+  callsub get_invoice_property
+  ==
+  assert
+
+  gtxn 0 Sender
+  byte "escrow_address"
+  app_global_get
+  ==
+  assert
+
+  // Check second transaction is transfer of invoice price from escrow to invoice owner
+  gtxn 1 AssetAmount
+  callsub calc_invoice_price
+  ==
+  assert
+
+  gtxn 1 Sender
+  byte "escrow_address"
+  app_global_get
+  ==
+  assert
+
+  gtxn 1 AssetReceiver
+  byte "owner_address"
+  app_global_get
+  ==
+  assert
+
+  // Transfer ownership token to escrow
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    byte "asa_id"
+    callsub get_invoice_property
+    itxn_field XferAsset
+    byte "escrow_address"
+    app_global_get
+    itxn_field AssetReceiver
+    byte "escrow_address"
+    app_global_get
+    itxn_field AssetCloseTo
+    int 1
+    itxn_field AssetAmount
+    int 0
+    itxn_field Fee
+  itxn_submit
+
+  // Write address of borrower to invoice
+  byte "invoice_address"
+  app_global_get
+  byte "debtor_address"
+  byte "owner_address"
+  app_global_get
+  app_local_put
+
+  // Set timestamp of winning bidder
+  byte "escrow_address"
+  app_global_get
+  byte "timestamp"
+  global LatestTimestamp
+  app_local_put
+
+  // Delete relevant global state
+  callsub reset_bid_state
+  
+  b approve
+// BRANCH action END
+
+// BRANCH reclaim START
+reclaim:
+  global GroupSize
+  int 1
+  ==
+  assert
+
+  // Check that bid has been actioned
+  byte "bidding_timeout"
+  app_global_get
+  int 0
+  !=
+  assert
+  byte "invoice_address"
+  app_global_get
+  int 0
+  ==
+  assert
+
+  txn Sender
+  callsub set_escrow_address
+
+  // Check escrow has an access token
+  callsub get_escrow_address
+  callsub get_access_token_balance
+  int 1
+  ==
+  assert
+
+  // Check escrow doesn't have a bidding token
+  callsub get_escrow_address
+  callsub get_bidding_token_balance
+  int 0
+  ==
+  assert
+
+  // Check escrow has sufficient funds and clawback access token if not
+  callsub check_bidding_balance
+  bz clawback_access
+
+  // Send bidding token to escrow
+  callsub transfer_bidding_token
+
+  // Check number of minted access tokens = minted bidding tokens
+  global CurrentApplicationAddress
+  callsub get_bidding_token_balance
+  global CurrentApplicationAddress
+  callsub get_access_token_balance
+  ==
+  bz approve
+
+  // Remove bidding timeout if all bidding tokens returned
+  byte "bidding_timeout"
+  app_global_del
+
+  b approve
+// BRANCH reclaim END
+
+// BRANCH clawaback_access START
+clawback_access:
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    byte "access_token_id"
+    app_global_get
+    itxn_field XferAsset
+    callsub get_escrow_address
+    itxn_field AssetSender
+    global CurrentApplicationAddress
+    itxn_field AssetReceiver
+    int 1
+    itxn_field AssetAmount
+    int 0
+    itxn_field Fee
+  itxn_submit
+
+  // Check number of minted access tokens = minted bidding tokens
+  global CurrentApplicationAddress
+  callsub get_bidding_token_balance
+  global CurrentApplicationAddress
+  callsub get_access_token_balance
+  ==
+  bz approve
+
+  // Remove bidding timeout if all bidding tokens returned
+  byte "bidding_timeout"
+  app_global_del
+
+  b approve
+// BRANCH clawback_access END
+
+// BRANCH reset START
+reset:
+  // Only the admin can reset the app
+  callsub check_admin
+
+  txn Accounts 1
+  callsub set_invoice_address
+
+  // Check the bidding period is over
+  byte "bidding_timeout"
+  app_global_get
+  global LatestTimestamp
+  <
+  assert
+
+  // Check that bid has not been actioned
+  global CurrentApplicationID
+  byte "invoice_address"
+  app_global_get_ex // Stack: value, exists=0/1
+  int 1
+  == // Key exists
+  assert
+  pop
+
+  // Transfer ownership token to back to previous owner
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    byte "asa_id"
+    callsub get_invoice_property
+    itxn_field XferAsset
+    byte "owner_address"
+    app_global_get
+    itxn_field AssetReceiver
+    byte "owner_address"
+    app_global_get
+    itxn_field AssetCloseTo
+    int 1
+    itxn_field AssetAmount
+    int 0
+    itxn_field Fee
+  itxn_submit
+
+  // Reset the global state so reclaiming is possible
+  callsub reset_bid_state
+
+  // Check number of minted access tokens = minted bidding tokens
+  global CurrentApplicationAddress
+  callsub get_bidding_token_balance
+  global CurrentApplicationAddress
+  callsub get_access_token_balance
+  ==
+  bz approve
+
+  // Remove bidding timeout if all bidding tokens returned
+  byte "bidding_timeout"
+  app_global_del
+
+  b approve
+// BRANCH reset END
+
+
+// BRANCH repay START
+repay:
+  callsub check_bidding_lock
+
+  // Should be grouped with two other transactions
+  global GroupSize
+  int 3
+  ==
+  assert
+
+  txn Accounts 1
+  callsub set_invoice_address
+
+  txn Accounts 2
+  callsub set_escrow_address
+
+  txn Sender
+  callsub set_borrower_address
+
+  byte "asa_id"
+  callsub get_invoice_property
+  callsub set_ownership_token_id
+
+  // Invoice should have borrowers address in local storage
+  callsub get_invoice_address
+  global CurrentApplicationID
+  byte "debtor_address"
+  app_local_get_ex
+  assert
+  callsub get_borrower_address
+  ==
+  assert
+
+  // Escrow and invoice should both hold same ownership token
+  callsub get_invoice_address
+  callsub check_ownership_token_balance
+
+  callsub get_escrow_address
+  callsub check_ownership_token_balance
+
+  // Second transaction should be transfer of invoice value from borrower to escrow
+  gtxn 1 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  gtxn 1 XferAsset
+  byte "currency_id"
+  app_global_get
+  ==
+  assert
+
+  gtxn 1 AssetAmount
+  byte "value"
+  callsub get_invoice_property
+  // Scale by USDC decimals and invoice value scale (invoice units are USD/100)
+  int 10
+  gtxn 1 XferAsset
+  asset_params_get AssetDecimals
+  assert
+  exp
+  int 100
+  /
+  *
+  ==
+  assert
+
+  gtxn 1 Sender
+  callsub get_borrower_address
+  ==
+  assert
+
+  gtxn 1 AssetReceiver
+  callsub get_escrow_address
+  ==
+  assert
+
+  // Third transaction should be transfer of ownership token to invoice address (burning)
+  gtxn 2 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  gtxn 2 XferAsset
+  callsub get_ownership_token_id
+  ==
+  assert
+
+  gtxn 2 AssetAmount
+  int 1
+  ==
+  assert
+
+  gtxn 2 Sender
+  callsub get_escrow_address
+  ==
+  assert
+
+  gtxn 2 AssetReceiver
+  callsub get_invoice_address
+  ==
+  assert
+
+  gtxn 2 AssetCloseTo
+  callsub get_invoice_address
+  ==
+  assert
+
+  b approve
+// BRANCH repay START
+
+// BRANCH approve START
+approve:
+  int 1
+  return
+// BRANCH approve END
+
+// BRANCH reject START
+reject:
+  int 0
+  return
+// BRANCH reject END
+
+// ----- SUBROUTINES -----
+
+// SUBROUTINE check_admin START
+check_admin:
+  txn Sender
+  global CreatorAddress
+  ==
+  assert
+
+  retsub
+// SUBROUTINE check_admin END
+
+// SUBROUTINE check_bidding_balance START
+check_bidding_balance:
+  // Check that escrow has enough algos to cover bidding
+  callsub get_escrow_address
+  balance
+  callsub get_escrow_address
+  min_balance
+  >= // balance >= min balance
+  assert
+  callsub get_escrow_address
+  balance
+  callsub get_escrow_address
+  min_balance
+  - // available balance = algo balance - min balance
+  byte "max_bid_fees"
+  app_global_get
+  >=
+
+  retsub
+// SUBROUTINE check_bidding_balance END
+
+// SUBROUTINE transfer_bidding_token START
+transfer_bidding_token:
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    byte "bidding_token_id"
+    app_global_get
+    itxn_field XferAsset
+    callsub get_escrow_address
+    itxn_field AssetReceiver
+    int 1
+    itxn_field AssetAmount
+    int 0
+    itxn_field Fee
+  itxn_submit
+
+  retsub
+// SUBROUTINE transfer_bidding_token END
+
+// SUBROUTINE transfer_access_token START
+transfer_access_token:
+  itxn_begin
+    int axfer
+    itxn_field TypeEnum
+    byte "access_token_id"
+    app_global_get
+    itxn_field XferAsset
+    callsub get_escrow_address
+    itxn_field AssetReceiver
+    int 1
+    itxn_field AssetAmount
+    int 0
+    itxn_field Fee
+  itxn_submit
+
+  retsub
+// SUBROUTINE transfer_access_token END
+
+// SUBROUTINE check_bidding_lock START
+check_bidding_lock:
+  // Fail if bidding timeout is set
+  byte "bidding_timeout"
+  app_global_get
+  int 0
+  ==
+  assert
+
+  retsub
+// SUBROUTINE check_bidding_lock END
+
+// SUBROUTINE check_bidding_timeout START
+check_bidding_timeout:
+  byte "bidding_timeout"
+  app_global_get
+  global LatestTimestamp
+  >=
+  assert
+
+  retsub
+// SUBROUTINE check_bidding_timeout END
+
+// SUBROUTINE get_bidding_token_balance START
+get_bidding_token_balance:
+  byte "bidding_token_id"
+  app_global_get
+  asset_holding_get AssetBalance
+  assert
+
+  retsub
+// SUBROUTINE get_bidding_token_balance END
+
+// SUBROUTINE get_access_token_balance START
+get_access_token_balance:
+  byte "access_token_id"
+  app_global_get
+  asset_holding_get AssetBalance
+  assert
+
+  retsub
+// SUBROUTINE get_access_token_balance END
+
+// SUBROUTINE get_currency_balance START
+get_currency_balance:
+  byte "currency_id"
+  app_global_get
+  asset_holding_get AssetBalance
+  assert
+
+  retsub
+// SUBROUTINE get_currency_balance END
+
+// SUBROUTINE check_ownership_token_balance START
+check_ownership_token_balance:
+  // Expects address at top of stack
+  callsub get_ownership_token_id
+  asset_holding_get AssetBalance
+  assert
+  int 1
+  ==
+  assert
+
+  retsub
+// SUBROUTINE check_ownership_token_balance END
+
+// SUBROUTINE get_invoice_property START
+get_invoice_property:
+  // Expect stack to be: key name
+  callsub get_invoice_address
+  swap // swap invoice address and key name
+  byte "minter_id"
+  app_global_get
+  swap // Swap minter ID and key name
+  app_local_get_ex
+  assert
+
+  retsub
+// SUBROUTINE get_invoice_property END
+
+// SUBROUTINE calc_invoice_price START
+calc_invoice_price:
+  // The price of the invoice will be its value - expected interest (+ fees)
+  // The interest is calculated with the simple interest formula based on the price that the investor pays
+  // rather than the total value of the invoice
+  // We use the bidding timeout rather than the latest timestamp as this will correspond to the
+  // maximum price an investor could have to pay and can be used to prevent slippage
+  // TODO add fees to calculation
+  // TODO worry about compound interest?
+  byte "value"
+  callsub get_invoice_property
+  // Scale by USDC decimals and invoice value scale (invoice units are USD/100)
+  int 10
+  byte "currency_id"
+  app_global_get
+  asset_params_get AssetDecimals
+  assert
+  exp
+  int 100
+  /
+  * // value * 10^{currency decimals} / 100
+  int 100000000 // X = Multiplicative factor used to keep track of interest decimals
+  mulw // Invoice value * X
+  byte "due_date"
+  callsub get_invoice_property
+  byte "bidding_timeout"
+  app_global_get
+  - // tenor[s] = due date[timestamp] - bidding timeout[timestamp]
+  byte "interest_rate"
+  callsub get_invoice_property 
+  mulw // interest[X/year] * tenor[s]
+  int 31536000
+  callsub divw // actual interest * X = interest[X/year] * tenor[s] / s in year
+  int 100000000
+  + //(1 + actual interest) * X
+  callsub divw // price = value * X / ((1 + actual interest) * X)
+
+  retsub
+// SUBROUTINE calc_invoice_price END
+
+// SUBROUTINE divw START
+divw:
+  // Mimic behaviour of divw opcode from v6
+  // A,B/C => uint64
+  // A,B are interpreted as a uint128 value
+  int 1
+  mulw
+  divmodw // A, B, C, D => W, X, Y, Z (A,B/C,D = W,X; A,B modulo C,D = Y,Z)
+  pop
+  pop
+  swap
+  pop // Only low quotient remains on stack (W)
+
+  retsub
+// SUBROUTINE divw END
+
+// SUBROUTINE reset_bid_state START
+reset_bid_state:
+  byte "owner_address"
+  app_global_del
+  byte "escrow_address"
+  app_global_del
+  byte "invoice_address"
+  app_global_del
+  byte "leading_timestamp"
+  app_global_del
+
+  retsub
+// SUBROUTINE reset_bid_state END
+
+// SUBROUTINE set_ownership_token_id START
+set_ownership_token_id:
+  store 0
+  retsub
+// SUBROUTINE set_ownership_token_id END
+
+// SUBROUTINE get_ownership_token_id START
+get_ownership_token_id:
+  load 0
+  retsub
+// SUBROUTINE get_ownership_token_id END
+
+// SUBROUTINE set_escrow_address START
+set_invoice_address:
+  store 1
+  retsub
+// SUBROUTINE set_invoice_address END
+
+// SUBROUTINE get_invoice_address START
+get_invoice_address:
+  load 1
+  retsub
+// SUBROUTINE get_invoice_address END
+
+// SUBROUTINE set_escrow_address START
+set_escrow_address:
+  store 2
+  retsub
+// SUBROUTINE set_escrow_address END
+
+// SUBROUTINE get_escrow_address START
+get_escrow_address:
+  load 2
+  retsub
+// SUBROUTINE get_escrow_address END
+
+// SUBROUTINE set_investor_address START
+set_investor_address:
+  store 3
+  retsub
+// SUBROUTINE set_investor_address END
+
+// SUBROUTINE get_investor_address START
+get_investor_address:
+  load 3
+  retsub
+// SUBROUTINE get_investor_address END
+
+// SUBROUTINE set_borrower_address START
+set_borrower_address:
+  store 4
+  retsub
+// SUBROUTINE set_borrower_address END
+
+// SUBROUTINE get_borrower_address START
+get_borrower_address:
+  load 4
+  retsub
+// SUBROUTINE get_borrower_address END

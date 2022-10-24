@@ -1,0 +1,709 @@
+#pragma version 5
+
+txn CloseRemainderTo
+global ZeroAddress
+==
+assert
+
+txn RekeyTo
+global ZeroAddress
+==
+assert
+
+txn TypeEnum
+int appl
+==
+bnz application_call
+
+// Check that this tx is an asset transfer
+txn TypeEnum
+int axfer
+==
+assert
+
+// Check that the asset sender is not set (we use the Sender field, AssetSender only to be used in
+// clawback txns)
+txn AssetSender
+global ZeroAddress
+==
+assert
+
+// Check if amount 0 (opt in txn)
+txn AssetAmount
+int 0
+==
+bnz opt_in_asset
+
+// All other functions are non opt-in asset transfers
+txn XferAsset
+callsub get_currency_token
+==
+bnz transfer_currency
+
+txn XferAsset
+callsub get_bidding_token
+==
+bnz transfer_bidding_token
+
+txn XferAsset
+callsub get_access_token
+==
+bnz freeze
+
+// If transfer of another token it must be invoice asset (repayment completed, burning token)
+b transfer_ownership_token
+
+// BRANCH opt_in_asset START
+opt_in_asset:
+  txn AssetCloseTo
+  global ZeroAddress
+  ==
+  assert
+
+  // Opt in so this contract should be the receiver
+  txn AssetReceiver
+  txn Sender
+  ==
+  assert 
+
+  // If asset type isn't one of the known tokens it must be an invoice ownership token
+  txn XferAsset
+  callsub get_currency_token
+  ==
+  txn XferAsset
+  callsub get_access_token
+  ==
+  ||
+  txn XferAsset
+  callsub get_bidding_token
+  ==
+  ||
+  bz action
+
+  // Group size of 3 for opt in to bidding and access token (unfreeze)
+  global GroupSize
+  int 3
+  ==
+  bnz unfreeze
+
+  // Verify the transaction group for the initial opt-in
+  // NOTE: This doubles as a check for if the escrow has already opted in
+  // as it's not possible to opt-in to an app twice (but is possible to opt-in to asset twice)
+  callsub check_opt_in_group
+
+  // Approve if asset type is currency token
+  txn XferAsset
+  callsub get_currency_token
+  ==
+  bnz accept
+
+  b reject
+// BRANCH opt_in_asset END
+
+// BRANCH application_call START
+application_call:
+  txn OnCompletion
+  int OptIn
+  ==
+  bnz opt_in_contract
+
+  // Only allowed no-op call is a bid
+  txn OnCompletion
+  int NoOp
+  ==
+  bnz no_op
+
+  err
+// BRANCH application_call END
+
+// BRANCH no_op START
+no_op:
+  txna ApplicationArgs 0
+  byte "bid"
+  ==
+  bnz bid
+
+  txna ApplicationArgs 0
+  byte "reclaim"
+  ==
+  bnz reclaim
+
+  err
+// BRANCH no_op END
+
+// BRANCH opt_in_contract START
+opt_in_contract:
+  txn OnCompletion
+  int OptIn
+  ==
+  assert
+
+  callsub check_opt_in_group 
+
+  txn ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  b accept
+// BRANCH opt_in_contract END
+
+// BRANCH transfer_currency START
+transfer_currency: 
+  txn AssetCloseTo
+  global ZeroAddress
+  ==
+  assert
+
+  // If transfer is of currency it's either a loan or withdrawal
+  // If transfer is to owner then withdrawal
+  txn AssetReceiver
+  callsub get_investor
+  ==
+  bnz withdraw
+
+  // If it's a loan it must be grouped with an application call to matching contract
+  b action
+// BRANCH transfer_currency END
+
+// BRANCH transfer_bidding_token START
+transfer_bidding_token:
+  txn AssetCloseTo
+  global ZeroAddress
+  ==
+  assert
+
+  // If transfer is of bidding token it's either a bid or freeze
+  // If transfer is also of access token then it's freeze
+  global GroupSize
+  int 3
+  ==
+  bnz freeze
+
+  // Otherwise it's part of the bid group
+  b bid
+// BRANCH transfer_bidding_token END
+
+// BRANCH transfer_ownership_token START
+transfer_ownership_token:
+  // If grouped with another two transactions then this is a repayment
+  global GroupSize
+  int 3
+  ==
+  bnz repay
+
+  err
+// BRANCH transfer_ownership_token END
+
+// BRANCH withdraw START
+withdraw:
+  // Investor should pay the fees
+  txn Fee
+  int 0
+  ==
+  assert
+   
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  // Second transaction in group should be call to bid no-op
+  gtxn 1 TypeEnum
+  int appl // Application call
+  ==
+  assert
+
+  gtxn 1 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  gtxn 1 OnCompletion
+  int NoOp
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 0
+  byte "withdraw"
+  ==
+  assert
+
+  gtxn 1 Sender
+  callsub get_investor
+  ==
+  assert
+
+  b accept
+// BRANCH withdraw END
+
+// BRANCH unfreeze START
+unfreeze:
+  // First transaction is opt-in to bidding token
+  gtxn 0 XferAsset
+  callsub get_bidding_token
+  ==
+  assert
+
+  gtxn 0 AssetAmount
+  int 0
+  ==
+  assert
+
+  // Second transaction is opt-in to access token
+  gtxn 1 XferAsset
+  callsub get_access_token
+  ==
+  assert
+
+  gtxn 1 AssetAmount
+  int 0
+  ==
+  assert
+
+  gtxn 2 TypeEnum
+  int appl // ApplicationCall
+  ==
+  assert
+
+  // Third transaction is unfreeze call to matching app
+  gtxn 2 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  gtxn 2 OnCompletion
+  int NoOp
+  ==
+  assert
+
+  gtxn 2 NumAppArgs
+  int 2
+  ==
+  assert
+
+  gtxna 2 ApplicationArgs 0 // NoOp name
+  byte "unfreeze"
+  ==
+  assert
+
+  // Verify the minimum loan value input to the unfreeze call matches this escrow
+  gtxna 2 ApplicationArgs 1
+  btoi
+  callsub get_minimum_value
+  ==
+  assert
+
+  // Approve if asset type is bidding token
+  txn XferAsset
+  callsub get_bidding_token
+  ==
+  bnz accept
+
+  // Approve if asset type is access token
+  txn XferAsset
+  callsub get_access_token
+  ==
+  bnz accept
+
+  err
+// BRANCH unfreeze END
+
+// BRANCH freeze START
+freeze:
+  txn AssetCloseTo
+  global ZeroAddress
+  ==
+  assert
+  
+  // Investor should pay the fees
+  txn Fee
+  int 0
+  ==
+  assert
+
+  // Check first transaction is transfer of bidding token
+  gtxn 0 XferAsset
+  callsub get_bidding_token
+  ==
+  assert 
+
+  gtxn 0 AssetAmount
+  int 1
+  ==
+  assert
+
+  // Check second transaction is transfer of access token
+  gtxn 1 XferAsset
+  callsub get_access_token
+  ==
+  assert 
+
+  gtxn 1 AssetAmount
+  int 1
+  ==
+  assert
+
+  // Check third transaction is freeze app call from investor
+  gtxn 2 TypeEnum
+  int appl // ApplicationCall
+  ==
+  assert
+
+  gtxn 2 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  gtxn 2 OnCompletion
+  int NoOp
+  ==
+  assert
+
+  gtxna 2 ApplicationArgs 0
+  byte "freeze"
+  ==
+  assert
+
+  gtxn 2 Sender
+  callsub get_investor
+  ==
+  assert
+
+  // Approve if asset type is bidding token
+  txn XferAsset
+  callsub get_bidding_token
+  ==
+  bnz accept
+
+  // Approve if asset type is access token
+  txn XferAsset
+  callsub get_access_token
+  ==
+  bnz accept
+  
+  err
+// BRANCH freeze END
+
+// BRANCH bid START
+bid:
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  // First transaction in group should be transfer of bidding token
+  gtxn 0 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  gtxn 0 XferAsset
+  callsub get_bidding_token
+  ==
+  assert
+
+  gtxn 0 AssetAmount
+  int 1
+  ==
+  assert
+
+  gtxn 0 Sender
+  txn Sender
+  ==
+  assert
+
+  // Second transaction in group should be call to bid no-op
+  gtxn 1 TypeEnum
+  int appl // Application call
+  ==
+  assert
+
+  gtxn 1 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  gtxn 1 OnCompletion
+  int NoOp
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 0
+  byte "bid"
+  ==
+  assert
+
+  gtxn 1 Sender
+  txn Sender
+  ==
+  assert
+
+  // Check the investment requirements
+  gtxna 1 ApplicationArgs 1 // Min invoice value
+  btoi
+  callsub get_minimum_value
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 2 // Max invoice value
+  btoi
+  callsub get_maximum_value
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 3 // Min invoice term
+  btoi
+  callsub get_minimum_term
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 4 // Max invoice term
+  btoi
+  callsub get_maximum_term
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 5 // Min invoice interest
+  btoi
+  callsub get_minimum_interest
+  ==
+  assert
+
+  gtxna 1 ApplicationArgs 6 // Max invoice interest
+  btoi
+  callsub get_maximum_risk
+  ==
+  assert
+
+  b accept
+// BRANCH bid END
+
+// BRANCH action START
+action:
+  global GroupSize
+  int 3
+  ==
+  assert
+
+  // First transaction in group should be opt in to ownership token
+  gtxn 0 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+
+  // Matching contract checks the ownership token asset ID
+  
+  // Opt in should transfer 0 tokens
+  gtxn 0 AssetAmount
+  int 0
+  ==
+  assert
+
+  // Sender should be this smart signature
+  gtxn 0 Sender
+  txn Sender
+  ==
+  assert
+
+  // Sender should be the same as the receiver
+  gtxn 0 Sender
+  gtxn 0 AssetReceiver
+  ==
+  assert
+  
+  // Second transaction in group should be transfer of currency to borrower
+  gtxn 1 TypeEnum
+  int axfer // Asset transfer
+  ==
+  assert
+ 
+  // Matching contract checks that the amount is correct
+  // Matching contract checks that the receiver is correct
+
+  // Check that the currency asset ID is correct
+  gtxn 1 XferAsset
+  callsub get_currency_token
+  ==
+  assert
+
+  // Check that sender is this smart signature
+  gtxn 1 Sender
+  txn Sender
+  ==
+  assert
+ 
+  // Third transaction in group should be call to action no-op
+  gtxn 2 TypeEnum
+  int appl // Application call
+  ==
+  assert
+  
+  // Check that call is to the matching app
+  gtxn 2 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+  
+  // Check that it is a no-op
+  gtxn 2 OnCompletion
+  int NoOp
+  ==
+  assert
+  
+  // Check that it's calling the action function
+  gtxna 2 ApplicationArgs 0
+  byte "action"
+  ==
+  assert
+
+  b accept
+// BRANCH action END
+
+// BRANCH reclaim START
+reclaim:
+  txn ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  b accept
+// BRANCH reclaim END
+
+// BRANCH repay START
+repay:
+  // Borrower should pay the fees
+  txn Fee
+  int 0
+  ==
+  assert
+
+  // First transaction in group should be call to repay no-op
+  // Matching app will check the other transactions in group
+  gtxn 0 TypeEnum
+  int appl // Application call
+  ==
+  assert
+  
+  // Check that call is to the matching app
+  gtxn 0 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+  
+  // Check that it is a no-op
+  gtxn 0 OnCompletion
+  int NoOp
+  ==
+  assert
+  
+  // Check that it's calling the repay function
+  gtxna 0 ApplicationArgs 0
+  byte "repay"
+  ==
+  assert
+
+  b accept
+// BRANCH repay END
+
+// BRANCH accept START
+accept:
+  int 1
+  return
+// BRANCH accept END
+
+// BRANCH reject START
+reject:
+  int 0
+  return
+// BRANCH accept END
+
+// ----- SUBROUTINES -----
+
+// SUBROUTINE check_opt_in_group START
+check_opt_in_group:
+  global GroupSize
+  int 2
+  ==
+  assert
+
+  gtxn 0 XferAsset
+  callsub get_currency_token
+  ==
+  assert
+
+  gtxn 1 ApplicationID
+  callsub get_matching_app
+  ==
+  assert
+
+  retsub
+// SUBROUTINE check_opt_in_group END
+
+// ----- SETTERS AND GETTERS -----
+
+// SUBROUTINE get_investor START
+get_investor:
+  addr <INVESTOR_ADDRESS>
+  retsub
+// SUBROUTINE get_investor END
+
+// SUBROUTINE get_currency_token START
+get_currency_token:
+  int <CURRENCY_TOKEN_ID>
+  retsub
+// SUBROUTINE get_currency_token END
+
+// SUBROUTINE get_bidding_token START
+get_bidding_token:
+  int <BIDDING_TOKEN_ID>
+  retsub
+// SUBROUTINE get_bidding_token END
+
+// SUBROUTINE get_access_token START
+get_access_token:
+  int <ACCESS_TOKEN_ID>
+  retsub
+// SUBROUTINE get_access_token END
+
+// SUBROUTINE get_matching_app START
+get_matching_app:
+  int <MATCHING_APP_ID>
+  retsub
+// SUBROUTINE get_matching_app END
+
+// SUBROUTINE get_minimum_interest START
+get_minimum_interest:
+  int <MINIMUM_INTEREST>
+  retsub
+// SUBROUTINE get_minimum_interest END
+
+// SUBROUTINE get_maximum_risk START
+get_maximum_risk:
+  int <MAXIMUM_RISK>
+  retsub
+// SUBROUTINE get_maximum_risk END
+
+// SUBROUTINE get_minimum_value START
+get_minimum_value:
+  int <MINIMUM_VALUE>
+  retsub
+// SUBROUTINE get_minimum_value END
+
+// SUBROUTINE get_maximum_value START
+get_maximum_value:
+  int <MAXIMUM_VALUE>
+  retsub
+// SUBROUTINE get_maximum_value END
+
+// SUBROUTINE get_minimum_term START
+get_minimum_term:
+  int <MINIMUM_TERM>
+  retsub
+// SUBROUTINE get_minimum_term END
+
+// SUBROUTINE get_maximum_term START
+get_maximum_term:
+  int <MAXIMUM_TERM>
+  retsub
+// SUBROUTINE get_maximum_term END
