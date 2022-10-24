@@ -1,6 +1,16 @@
-# tallysticks/contracts: Algorand smart contracts and supporting components
+# Tallysticks Smart Contracts
 
-This code has not been security audited and should only be used as an example.
+**Note**: This code has not been security audited and should only be used as an example.
+
+Tallysticks is a decentralised web application that enables blockchain based financing of real world assets. The first real world asset class being explored is invoice financing to businesses. Invoice financing refers to the process of selling invoices early at a discount. The “seller” of the invoice is the organisation that is owed money by a “buyer”, the seller will sell the invoice to an investor at an agreed upon discount and when the buyer eventually pays the invoice, the money will all go to the investor.
+
+For the first iteration, the invoice originator will handle the collection and verification of invoices. The Tallysticks application will act as an interface for investors to be able to purchase invoices from invoice originator and an interface for invoice originator to tokenise their invoices in order to be used on the blockchain.
+
+The application will be based on the Algorand blockchain as Algorand has low fees and is very scalable. Tallysticks will use the [Silent Data](https://silentdata.com) platform for the [invoice tokenisation](https://github.com/appliedblockchain/silentdata-mint-contracts) and providing blockchain compatible [Know Your Customer (KYC)](https://github.com/appliedblockchain/silentdata-id-contracts) checks for investors.
+
+Each investor has a set of requirements for invoices that they would be willing to buy. When a new invoice is tokenised an on chain asset is created to uniquely represent the off chain invoice. The tokenised invoice is presented to the smart contract that manages the system, called the matching contract. The matching contract will identify the investor that has waited the longest to buy an invoice from the set of investors whose requirements match the tokenised invoice and have enough money to pay for it. Once the match is found the investor will transfer the funds to invoice originator and take ownership of the invoice. When the invoice is repaid, invoice originator will transfer the money to the investor and the invoice token will be destroyed.
+
+![Tallysticks contracts design(17)](https://user-images.githubusercontent.com/12896404/197570922-eb45f8aa-e52d-44ba-ac25-2b35e8ce96d6.png)
 
 ## Setup
 
